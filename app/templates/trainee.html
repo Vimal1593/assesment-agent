@@ -1,0 +1,111 @@
+{% extends 'base.html' %}{% block title %}{{ assessment.title }} · Assessment{% endblock %}{% block content %}<div class="trainee-shell">
+{% if remaining_seconds is not none %}
+<div class="timer-bar card" id="timer-bar">
+  <div class="timer-inner">
+    <div class="timer-info">
+      <span class="timer-icon">⏱</span>
+      <span class="timer-label">Time Remaining:</span>
+      <strong class="timer-clock" id="timer-clock">--:--</strong>
+    </div>
+    <div class="timer-note small muted" id="timer-note">Auto-submits when time expires</div>
+  </div>
+  <div class="timer-progress-wrap">
+    <div class="timer-progress-bar" id="timer-progress"></div>
+  </div>
+</div>
+{% endif %}
+<div class="trainee-header"><p class="eyebrow">TRAINING ASSESSMENT</p><h1>{{ assessment.title }}</h1><p class="muted">{{ assessment.topic }}</p><div class="assessment-meta"><span>◉ {{ questions|length }} questions</span>{% if assessment.time_limit_minutes %}<span>◷ {{ assessment.time_limit_minutes }} minutes</span>{% endif %}{% if assessment.trainee_group %}<span>◎ {{ assessment.trainee_group }}</span>{% endif %}</div></div>{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}<div class="notice"><strong>Instructions</strong><p>{{ assessment.instructions }}</p><p class="small">One submission is allowed per trainee identifier. Your score is calculated when you submit.{% if assessment.time_limit_minutes %} When the timer reaches 00:00, your assessment will be submitted automatically.{% endif %}</p></div><form id="assessment-form" method="post" action="/a/{{ request.path_params.token }}/submit" class="stack"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="auto_submitted" id="auto_submitted" value="0"><section class="card form-card"><div class="field-grid"><div class="field"><label for="trainee_name">Your name</label><input id="trainee_name" name="trainee_name" required maxlength="200" autocomplete="name" placeholder="Full name"></div><div class="field"><label for="trainee_identifier">Trainee email address</label><input id="trainee_identifier" name="trainee_identifier" required maxlength="320" autocomplete="email" placeholder="name@company.com"></div></div></section>{% for q in questions %}<section class="card trainee-question"><div class="question-editor-heading"><span class="question-number">{{ '%02d'|format(loop.index) }}</span><div><span class="small muted">QUESTION {{ loop.index }} OF {{ questions|length }}</span><h2>{{ q.question }}</h2></div></div><fieldset><legend class="sr-only">Choose an answer for question {{ loop.index }}</legend>{% for opt in q.options %}<label class="answer-option"><input type="radio" name="q_{{ q.id }}" value="{{ opt.id }}"><span class="option-letter">{{ opt.id }}</span><span>{{ opt.text }}</span></label>{% endfor %}</fieldset></section>{% endfor %}<div class="submit-panel card"><p class="muted">Review your selections before submitting. You cannot retake this assessment using the same identifier.</p><button id="submit-btn" class="button button-primary" type="submit">Submit assessment →</button></div></form></div>
+<script>
+(function() {
+  var remainingSeconds = {{ remaining_seconds if remaining_seconds is not none else 'null' }};
+  var totalSeconds = {{ total_seconds if total_seconds is not none else 'null' }};
+  var form = document.getElementById('assessment-form');
+  var autoInput = document.getElementById('auto_submitted');
+  var submitBtn = document.getElementById('submit-btn');
+  var timerClock = document.getElementById('timer-clock');
+  var timerBar = document.getElementById('timer-bar');
+  var timerProgress = document.getElementById('timer-progress');
+  var timerNote = document.getElementById('timer-note');
+  var isAutoTriggered = false;
+
+  if (remainingSeconds !== null && timerClock) {
+    function formatTime(s) {
+      var m = Math.floor(s / 60);
+      var sec = s % 60;
+      return (m < 10 ? '0' : '') + m + ':' + (sec < 10 ? '0' : '') + sec;
+    }
+
+    function renderTimer(s) {
+      timerClock.textContent = formatTime(s);
+      if (totalSeconds && timerProgress) {
+        var pct = Math.max(0, Math.min(100, (s / totalSeconds) * 100));
+        timerProgress.style.width = pct + '%';
+      }
+      if (s <= 30) {
+        timerBar.classList.add('timer-danger');
+        timerBar.classList.remove('timer-warning');
+        if (timerNote) timerNote.textContent = 'Submitting soon!';
+      } else if (s <= 120) {
+        timerBar.classList.add('timer-warning');
+        timerBar.classList.remove('timer-danger');
+        if (timerNote) timerNote.textContent = 'Less than 2 minutes remaining';
+      }
+    }
+
+    function autoSubmit() {
+      if (isAutoTriggered) return;
+      isAutoTriggered = true;
+      if (autoInput) autoInput.value = '1';
+
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Auto-submitting...';
+      }
+
+      var banner = document.createElement('div');
+      banner.className = 'alert alert-warning';
+      banner.style.position = 'fixed';
+      banner.style.top = '16px';
+      banner.style.left = '50%';
+      banner.style.transform = 'translateX(-50%)';
+      banner.style.zIndex = '99999';
+      banner.style.boxShadow = '0 6px 24px rgba(0,0,0,0.2)';
+      banner.style.fontWeight = 'bold';
+      banner.textContent = '⏱ Time is up! Submitting your answers automatically...';
+      document.body.appendChild(banner);
+
+      setTimeout(function() {
+        form.submit();
+      }, 400);
+    }
+
+    renderTimer(remainingSeconds);
+
+    if (remainingSeconds <= 0) {
+      autoSubmit();
+    } else {
+      var ticker = setInterval(function() {
+        remainingSeconds--;
+        if (remainingSeconds <= 0) {
+          clearInterval(ticker);
+          renderTimer(0);
+          autoSubmit();
+        } else {
+          renderTimer(remainingSeconds);
+        }
+      }, 1000);
+    }
+  }
+
+  if (form) {
+    form.addEventListener('submit', function(e) {
+      if (isAutoTriggered) return true;
+      if (!confirm('Submit your answers now? You cannot change them afterward.')) {
+        e.preventDefault();
+        return false;
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}
