@@ -7,17 +7,45 @@ services:
       - .env
     environment:
       DATA_DIR: /app/data
+      OLLAMA_BASE_URL: http://ollama:11434
     ports:
-      # Bind to localhost for SSH-tunnel/reverse-proxy deployments. For temporary direct testing only,
-      # change the left side to 8000 (8000:8000) and restrict inbound access in the EC2 security group.
+      # Bind to localhost for SSH-tunnel/reverse-proxy deployments.
       - "127.0.0.1:8000:8000"
     volumes:
       - assessment_data:/app/data
+    networks:
+      - internal_network
+    depends_on:
+      ollama:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: assessment-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - internal_network
+    # Port 11434 is intentionally NOT exposed to the host machine or public internet.
+    # It is accessible solely inside the private Docker network at http://ollama:11434.
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  internal_network:
+    driver: bridge
+
 volumes:
   assessment_data:
+  ollama_data:

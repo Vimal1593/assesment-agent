@@ -84,3 +84,220 @@ def test_is_email_allowed():
     assert is_email_allowed(restricted, "trainee1@example.com") is True
     assert is_email_allowed(restricted, "TRAINEE1@EXAMPLE.COM") is True
     assert is_email_allowed(restricted, "trainee3@example.com") is False
+
+
+def test_extract_json_payload():
+    from app.question_generator import extract_json_payload
+    # Plain JSON
+    assert extract_json_payload('{"key": "value"}') == '{"key": "value"}'
+    # Markdown code fence
+    assert extract_json_payload('```json\n{"key": "value"}\n```') == '{"key": "value"}'
+    # Markdown code fence with extra conversation
+    text = 'Here is your draft:\n```json\n{"title": "Test", "topic": "T", "questions": []}\n```\nHope it helps!'
+    assert extract_json_payload(text) == '{"title": "Test", "topic": "T", "questions": []}'
+
+
+def test_ollama_generation_success(monkeypatch):
+    import json
+    import httpx
+    from app.question_generator import generate_assessment
+
+    valid_response_data = {
+        "model": "qwen2.5:7b",
+        "message": {
+            "role": "assistant",
+            "content": json.dumps({
+                "title": "Python Basics",
+                "topic": "Python",
+                "questions": [
+                    {
+                        "id": "q1",
+                        "question": "What is Python?",
+                        "options": [
+                            {"id": "A", "text": "A programming language"},
+                            {"id": "B", "text": "A reptile species only"},
+                            {"id": "C", "text": "A car brand"},
+                            {"id": "D", "text": "A coffee brand"}
+                        ],
+                        "correct_option_id": "A",
+                        "explanation": "Python is a high-level programming language.",
+                        "difficulty": "easy",
+                        "source_reference": "Section 1"
+                    }
+                ]
+            })
+        },
+        "done": True
+    }
+
+    class MockResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return valid_response_data
+        def raise_for_status(self):
+            pass
+
+    def mock_post(self, url, json=None, **kwargs):
+        return MockResponse()
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    draft = generate_assessment(
+        topic="Python",
+        instructions="Focus on basics",
+        source_text="Python is a programming language.",
+        question_count=1,
+        difficulty="easy"
+    )
+
+    assert draft.title == "Python Basics"
+    assert len(draft.questions) == 1
+    assert draft.questions[0].id == "q1"
+    assert draft.questions[0].correct_option_id == "A"
+
+
+def test_ollama_generation_malformed_output(monkeypatch):
+    import httpx
+    from app.question_generator import generate_assessment, GenerationError
+
+    class MockMalformedResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return {"message": {"content": "I cannot generate questions from this text."}}
+        def raise_for_status(self):
+            pass
+
+    def mock_post(self, url, json=None, **kwargs):
+        return MockMalformedResponse()
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    with pytest.raises(GenerationError) as exc_info:
+        generate_assessment(
+            topic="Test",
+            instructions="",
+            source_text="Some source text",
+            question_count=5,
+            difficulty="mixed"
+        )
+    assert "validation" in str(exc_info.value).lower() or "json" in str(exc_info.value).lower()
+
+
+def test_ollama_generation_schema_violation(monkeypatch):
+    import json
+    import httpx
+    from app.question_generator import generate_assessment, GenerationError
+
+    # Schema violation: only 2 options instead of exactly 4
+    invalid_schema_data = {
+        "title": "Invalid",
+        "topic": "Test",
+        "questions": [
+            {
+                "id": "q1",
+                "question": "Question with too few options?",
+                "options": [
+                    {"id": "A", "text": "Opt 1"},
+                    {"id": "B", "text": "Opt 2"}
+                ],
+                "correct_option_id": "A",
+                "explanation": "Exp",
+                "difficulty": "easy",
+                "source_reference": ""
+            }
+        ]
+    }
+
+    class MockViolationResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return {"message": {"content": json.dumps(invalid_schema_data)}}
+        def raise_for_status(self):
+            pass
+
+    def mock_post(self, url, json=None, **kwargs):
+        return MockViolationResponse()
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    with pytest.raises(GenerationError) as exc_info:
+        generate_assessment(
+            topic="Test",
+            instructions="",
+            source_text="Some text",
+            question_count=5,
+            difficulty="easy"
+        )
+    assert "validation" in str(exc_info.value).lower()
+
+
+def test_ollama_generation_connection_failure(monkeypatch):
+    import httpx
+    from app.question_generator import generate_assessment, GenerationError
+
+    def mock_post_connect_error(self, url, json=None, **kwargs):
+        raise httpx.ConnectError("Connection refused by target host")
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post_connect_error)
+
+    with pytest.raises(GenerationError) as exc_info:
+        generate_assessment(
+            topic="Test",
+            instructions="",
+            source_text="Some text",
+            question_count=5,
+            difficulty="easy"
+        )
+    assert "could not connect to ollama" in str(exc_info.value).lower()
+
+
+def test_ollama_generation_timeout(monkeypatch):
+    import httpx
+    from app.question_generator import generate_assessment, GenerationError
+
+    def mock_post_timeout(self, url, json=None, **kwargs):
+        raise httpx.ReadTimeout("Read timed out")
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post_timeout)
+
+    with pytest.raises(GenerationError) as exc_info:
+        generate_assessment(
+            topic="Test",
+            instructions="",
+            source_text="Some text",
+            question_count=5,
+            difficulty="easy"
+        )
+    assert "timed out" in str(exc_info.value).lower()
+
+
+def test_ollama_generation_model_not_found(monkeypatch):
+    import httpx
+    from app.question_generator import generate_assessment, GenerationError
+
+    class Mock404Response:
+        status_code = 404
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return {"error": "model 'qwen2.5:7b' not found, try pulling it first"}
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("404 Not Found", request=None, response=self)
+
+    def mock_post_404(self, url, json=None, **kwargs):
+        return Mock404Response()
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post_404)
+
+    with pytest.raises(GenerationError) as exc_info:
+        generate_assessment(
+            topic="Test",
+            instructions="",
+            source_text="Some text",
+            question_count=5,
+            difficulty="easy"
+        )
+    assert "was not found" in str(exc_info.value).lower()
+

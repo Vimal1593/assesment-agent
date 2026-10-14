@@ -1,13 +1,14 @@
-"""Safe OpenAI connectivity check: reports model and status, never prints secrets."""
+"""Diagnostic script: Note that question generation has migrated to Ollama."""
 import os
 import sys
-from openai import OpenAI, APIConnectionError, AuthenticationError, NotFoundError, RateLimitError
+
+print("NOTICE: Question generation has migrated from OpenAI to a locally hosted Ollama Qwen model.")
+print("Run 'python scripts/check_ollama_connection.py' to test Ollama connectivity instead.")
 
 key = os.getenv("OPENAI_API_KEY", "")
-model = os.getenv("OPENAI_MODEL", "gpt-6-luna")
 if not key or key == "replace_with_your_api_key":
-    print("ERROR: OPENAI_API_KEY is not configured. Set it in .env first.")
-    sys.exit(2)
+    print("OPENAI_API_KEY is not configured (OpenAI is no longer required for question generation).")
+    sys.exit(0)
 try:
     client = OpenAI(api_key=key, timeout=20, max_retries=0)
     # Minimal Responses API request confirms both API authentication and model access.
