@@ -1,23 +1,23 @@
 services:
-  assessment-app:
+  assessment-ollama-test:
     build: .
-    container_name: training-assessment-ai
+    container_name: assessment-ollama-test
     restart: unless-stopped
     env_file:
       - .env
     environment:
       DATA_DIR: /app/data
-      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:0.5b-instruct}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
     ports:
-      # Bind to localhost for SSH-tunnel/reverse-proxy deployments.
-      - "127.0.0.1:8000:8000"
+      # Isolated test app on host port 8001 (keeping production app running on port 8000)
+      - "127.0.0.1:8001:8000"
     volumes:
-      - assessment_data:/app/data
+      # Isolated persistent volume for test app (does not overwrite production assessment_data)
+      - assessment_test_data:/app/data
     networks:
-      - internal_network
-    depends_on:
-      ollama:
-        condition: service_healthy
+      - ollama_private_network
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 30s
@@ -25,16 +25,20 @@ services:
       retries: 3
       start_period: 15s
 
+  # Optional local Ollama service for environments without an existing Ollama container.
+  # On EC2, this service is skipped because the existing 'ollama' container is reused.
+  # Run 'docker compose --profile local-ollama up -d' only if testing locally without an external Ollama daemon.
   ollama:
     image: ollama/ollama:latest
-    container_name: assessment-ollama
+    container_name: assessment-ollama-local
     restart: unless-stopped
+    profiles:
+      - local-ollama
     volumes:
-      - ollama_data:/root/.ollama
+      - ollama_test_data:/root/.ollama
     networks:
-      - internal_network
-    # Port 11434 is intentionally NOT exposed to the host machine or public internet.
-    # It is accessible solely inside the private Docker network at http://ollama:11434.
+      - ollama_private_network
+    # Port 11434 is NOT exposed to host or internet; accessible only internally within ollama_private_network.
     healthcheck:
       test: ["CMD-SHELL", "ollama list || exit 1"]
       interval: 15s
@@ -43,9 +47,10 @@ services:
       start_period: 10s
 
 networks:
-  internal_network:
+  ollama_private_network:
+    name: ollama_private_network
     driver: bridge
 
 volumes:
-  assessment_data:
-  ollama_data:
+  assessment_test_data:
+  ollama_test_data:

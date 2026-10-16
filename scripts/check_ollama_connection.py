@@ -4,7 +4,7 @@ import sys
 import httpx
 
 base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+model = os.getenv("OLLAMA_MODEL", "qwen2.5:0.5b-instruct")
 
 print(f"Connecting to Ollama at: {base_url} ...")
 try:
@@ -23,7 +23,7 @@ try:
         model_installed = any(m == model or m.startswith(f"{model}:") or model.startswith(f"{m}:") for m in models)
         if not model_installed:
             print(f"WARNING: Configured model '{model}' is not in the installed models list.")
-            print(f"To pull it, run: docker compose exec ollama ollama run {model}")
+            print(f"To pull it, run: docker exec -it ollama ollama pull {model}")
         else:
             print(f"SUCCESS: Model '{model}' is ready.")
 

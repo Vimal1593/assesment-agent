@@ -26,8 +26,8 @@ A trainer-reviewed MCQ assessment web app built with Python 3.12, FastAPI, Jinja
 Use Python 3.12 and ensure Ollama is installed and running (`ollama serve`):
 
 ```bash
-# Pull the desired model in Ollama
-ollama pull qwen2.5:7b
+# Pull the desired model in Ollama (if running local Ollama daemon)
+ollama pull qwen2.5:0.5b-instruct
 
 # Setup Python environment
 python3.12 -m venv .venv
@@ -39,8 +39,9 @@ cp .env.example .env
 # Generate secret key
 python -c 'import secrets; print(secrets.token_urlsafe(48))'
 # Put the generated value into APP_SECRET_KEY in .env.
-# Set OLLAMA_BASE_URL (defaults to http://localhost:11434)
-# Set OLLAMA_MODEL (defaults to qwen2.5:7b)
+# LLM_PROVIDER defaults to ollama
+# OLLAMA_BASE_URL defaults to http://localhost:11434 for local runs
+# OLLAMA_MODEL defaults to qwen2.5:0.5b-instruct
 # Set a strong APP_ADMIN_PASSWORD in .env.
 
 set -a; source .env; set +a
@@ -49,39 +50,24 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 Open `http://127.0.0.1:8000`. Trainer routes redirect to `/login`; use `APP_ADMIN_PASSWORD` from `.env`. The database defaults to `./data/assessment.db` for local runs.
 
-## Docker Compose deployment on Ubuntu EC2
+## Isolated Docker Compose test deployment on Ubuntu EC2 (Port 8001)
 
-### 1. Check instance resources and OS
+This configuration runs the Ollama assessment app as an **isolated test deployment** alongside the existing production application.
 
-```bash
-lsb_release -a
-uname -a
-free -h
-df -h
-nproc
-```
+### Key Isolation Guarantees:
+- **Port Isolation:** The test container binds to host port `8001` (`127.0.0.1:8001:8000`), keeping the existing production application running undisturbed on port `8000`.
+- **Container Isolation:** The test container is named `assessment-ollama-test` (separate from `training-assessment-ai`).
+- **Data Isolation:** Persists data to a dedicated named volume `assessment_test_data` (does not touch or overwrite `assessment_data`).
+- **Network & Ollama Reuse:** Connects to the existing EC2 `ollama` container over a private Docker bridge network (`ollama_private_network`). Ollama port `11434` is **never** exposed publicly or on the host. No duplicate Ollama container is created on EC2.
 
-### 2. Install Docker if needed
+---
 
-For Ubuntu, the distro package is a simple starting point:
+### 1. Configure test environment secrets
 
-```bash
-sudo apt-get update
-sudo apt-get install -y docker.io docker-compose-v2
-sudo systemctl enable --now docker
-docker --version
-docker compose version
-sudo docker run --rm hello-world
-```
-
-If `docker-compose-v2` is unavailable for your Ubuntu release, use Docker's official Ubuntu installation instructions to install Docker Engine and the Compose plugin. Log out/in after adding your user to the `docker` group; otherwise run Docker commands with `sudo`.
-
-### 3. Copy the project to EC2 and configure secrets
-
-Upload/copy this directory to the EC2 host, then:
+On the EC2 host:
 
 ```bash
-cd training-assessment-agent
+cd /path/to/test-deployment-dir
 cp .env.example .env
 chmod 600 .env
 python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
@@ -90,8 +76,9 @@ python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
 Edit `.env` and set at minimum:
 
 ```dotenv
+LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://ollama:11434
-OLLAMA_MODEL=qwen2.5:7b
+OLLAMA_MODEL=qwen2.5:0.5b-instruct
 OLLAMA_TIMEOUT_SECONDS=120
 APP_ENV=production
 APP_SECRET_KEY=replace_with_output_from_secrets_token_urlsafe
@@ -99,44 +86,64 @@ APP_ADMIN_PASSWORD=replace_with_a_long_unique_password
 SESSION_HTTPS_ONLY=true
 ```
 
-Ensure `OLLAMA_MODEL` matches the model you pull in step 4. Do not paste secrets into source files, Git, or chat.
+> **Optional OpenAI Provider:** If you wish to test with OpenAI instead, set `LLM_PROVIDER=openai`, `OPENAI_API_KEY=your_key`, and `OPENAI_MODEL=gpt-4o-mini`. When `LLM_PROVIDER=ollama` (default), no OpenAI API key is needed.
 
-### 4. Build, start, and pull model
+---
+
+### 2. Build and start the test container
 
 ```bash
 docker compose config
 docker compose build --pull
 docker compose up -d
 docker compose ps
-
-# Pull the Qwen model inside the Ollama container (port 11434 is private to internal_network)
-docker compose exec ollama ollama pull qwen2.5:7b
-
-docker compose logs --tail=100 assessment-app
-curl --fail http://127.0.0.1:8000/health
 ```
 
-> **Security Note:** Port `11434` is **not** exposed on the host machine or public internet. The `compose.yaml` configuration binds Ollama exclusively to the private Docker bridge network (`internal_network`), accessible solely by `assessment-app` at `http://ollama:11434`.
+---
 
-The default Compose mapping for the web app is `127.0.0.1:8000:8000`: only processes on the host can connect directly, which is appropriate behind an Nginx reverse proxy or SSH tunnel. For temporary direct testing only, change it to `8000:8000` and restrict inbound security-group access to your IP. For real users, use HTTPS through a reverse proxy or load balancer; do not expose the plain HTTP app directly to the public internet.
+### 3. Connect existing EC2 `ollama` container to the private network
 
-To open the UI from your local computer while keeping the port private, run this on your computer:
+On EC2, attach the existing running `ollama` container to the private network:
 
 ```bash
-ssh -i /path/to/key.pem -L 8000:127.0.0.1:8000 ubuntu@EC2_PUBLIC_IP
+# Attach existing ollama container to the private bridge network
+docker network connect ollama_private_network ollama
 ```
 
-Then open `http://127.0.0.1:8000` in your browser. Replace `ubuntu` with your EC2 login user as appropriate.
+> **Note:** Inside `ollama_private_network`, `assessment-ollama-test` resolves the container by its name `ollama` at `http://ollama:11434`. Port 11434 remains unexposed to the host and WAN.
 
-### 5. Verify Ollama connectivity and model generation
+---
 
-Run the safe connectivity diagnostic script inside the running container:
+### 4. Verify test application health and Ollama connectivity
+
+Check container logs and health check:
 
 ```bash
-docker compose exec assessment-app python scripts/check_ollama_connection.py
+docker compose logs --tail=100 assessment-ollama-test
+curl --fail http://127.0.0.1:8001/health
 ```
 
-This verifies that the assessment app can reach Ollama over the private network, validates that the model is loaded, and performs a minimal dry-run generation without exposing secrets.
+Run the non-destructive diagnostic script inside the test container:
+
+```bash
+docker compose exec assessment-ollama-test python scripts/check_ollama_connection.py
+```
+
+This verifies private reachability of the `ollama` container, checks that `qwen2.5:0.5b-instruct` is loaded, and runs a test generation without logging any secrets.
+
+---
+
+### 5. Access the test web interface safely via SSH tunnel
+
+To open the test app in your browser while keeping port 8001 private to localhost:
+
+```bash
+ssh -i /path/to/key.pem -L 8001:127.0.0.1:8001 ubuntu@EC2_PUBLIC_IP
+```
+
+Open `http://127.0.0.1:8001` in your browser. (The production app remains available concurrently at `http://127.0.0.1:8000`).
+
+---
 
 ## Tests and validation
 
@@ -179,36 +186,27 @@ docker compose build
 - **Database permission error:** named volume is `assessment_data`; inspect `docker compose exec assessment-app id` and `docker volume ls`. Avoid changing ownership blindly on a live volume.
 - **Syntax error:** `python -m py_compile app/*.py scripts/*.py tests/*.py`; then review the reported filename and line.
 
-## Rollback Procedure
+## Rollback and Test Cleanup Procedure
 
-To roll back from the `ollama` branch to `dev` (or a prior release):
+To remove or stop the isolated test deployment without affecting the production port-8000 application:
 
-1. **Stop active containers:**
+1. **Stop the test container:**
    ```bash
    docker compose down
    ```
-2. **Checkout the target branch:**
+2. **Disconnect the existing `ollama` container from the test network (if cleaning up network):**
    ```bash
-   git checkout dev
+   docker network disconnect ollama_private_network ollama
    ```
-3. **Restore environment variables:**
-   Review and update `.env` with the original configuration (e.g. restoring `OPENAI_API_KEY` and `OPENAI_MODEL`).
-4. **Rebuild and restart containers:**
+3. **(Optional) Remove isolated test volume:**
    ```bash
-   docker compose build --no-cache
-   docker compose up -d
+   docker volume rm assessment_test_data
    ```
-5. **Verify health:**
+4. **Verification:**
+   Confirm that the production container `training-assessment-ai` on port 8000 and the `ollama` container are still running normally:
    ```bash
-   docker compose ps
+   docker ps
    curl --fail http://127.0.0.1:8000/health
-   ```
-6. **(Optional) Database rollback:**
-   If a schema change was made, restore the database snapshot from `backups/`:
-   ```bash
-   docker compose stop assessment-app
-   docker run --rm -v training-assessment-agent_assessment_data:/data -v "$PWD/backups:/backup" alpine sh -c 'cp /backup/<backup-file>.db /data/assessment.db'
-   docker compose up -d assessment-app
    ```
 
 ## Backup and upgrades
@@ -217,8 +215,8 @@ Back up SQLite before changing versions or schema:
 
 ```bash
 mkdir -p backups
-docker compose stop assessment-app
-docker run --rm -v training-assessment-agent_assessment_data:/data -v "$PWD/backups:/backup" alpine sh -c 'cp /data/assessment.db /backup/assessment-$(date +%Y%m%d-%H%M%S).db'
+docker compose stop assessment-ollama-test
+docker run --rm -v assessment_test_data:/data -v "$PWD/backups:/backup" alpine sh -c 'cp /data/assessment.db /backup/assessment-$(date +%Y%m%d-%H%M%S).db'
 docker compose up -d
 ```
 
@@ -238,17 +236,24 @@ The volume name may be prefixed by your Compose project name; confirm it with `d
 
 ```mermaid
 flowchart TD
-    T[Trainer browser] --> W[FastAPI + Jinja2 UI]
-    S[Trainee browser] --> W
-    W --> A[Assessment service]
-    W --> D[Document extraction service]
-    W --> G[Grading service]
-    A --> DB[(SQLite persistent volume)]
-    G --> DB
-    D --> Q[Question generator]
-    Q --> O["Ollama Container (Private Network: internal_network)"]
-    Q --> DB
-    W --> R[CSV reporting]
+    subgraph Host["Ubuntu EC2 Host"]
+        subgraph Ports["Exposed Loopback Ports"]
+            P8000["127.0.0.1:8000 (Production App: training-assessment-ai)"]
+            P8001["127.0.0.1:8001 (Isolated Test App: assessment-ollama-test)"]
+        end
+        subgraph PrivateNet["Private Docker Bridge: ollama_private_network"]
+            APP["assessment-ollama-test container"]
+            OLLAMA["Existing ollama container (Port 11434 private)"]
+        end
+        subgraph Storage["Isolated Volumes"]
+            V1[("assessment_data (Production DB)")]
+            V2[("assessment_test_data (Test DB)")]
+        end
+    end
+    P8001 --> APP
+    APP --> OLLAMA
+    APP --> V2
+    P8000 --> V1
 ```
 
 ## Production hardening checklist

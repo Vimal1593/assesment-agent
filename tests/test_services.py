@@ -282,7 +282,7 @@ def test_ollama_generation_model_not_found(monkeypatch):
         status_code = 404
         headers = {"content-type": "application/json"}
         def json(self):
-            return {"error": "model 'qwen2.5:7b' not found, try pulling it first"}
+            return {"error": "model 'qwen2.5:0.5b-instruct' not found, try pulling it first"}
         def raise_for_status(self):
             raise httpx.HTTPStatusError("404 Not Found", request=None, response=self)
 
@@ -300,4 +300,139 @@ def test_ollama_generation_model_not_found(monkeypatch):
             difficulty="easy"
         )
     assert "was not found" in str(exc_info.value).lower()
+
+
+def test_provider_selection_ollama_does_not_require_openai_key(monkeypatch):
+    import json
+    import httpx
+    from app.config import get_settings
+    from app.question_generator import generate_assessment
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    get_settings.cache_clear()
+
+    valid_response_data = {
+        "model": "qwen2.5:0.5b-instruct",
+        "message": {
+            "role": "assistant",
+            "content": json.dumps({
+                "title": "Cloud Fundamentals",
+                "topic": "Cloud",
+                "questions": [
+                    {
+                        "id": "q1",
+                        "question": "What does IaaS stand for?",
+                        "options": [
+                            {"id": "A", "text": "Infrastructure as a Service"},
+                            {"id": "B", "text": "Internet as a Service"},
+                            {"id": "C", "text": "Integration as a Service"},
+                            {"id": "D", "text": "Identity as a Service"}
+                        ],
+                        "correct_option_id": "A",
+                        "explanation": "IaaS stands for Infrastructure as a Service.",
+                        "difficulty": "easy",
+                        "source_reference": "Slide 2"
+                    }
+                ]
+            })
+        }
+    }
+
+    class MockResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return valid_response_data
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(httpx.Client, "post", lambda self, url, json=None, **kwargs: MockResponse())
+
+    draft = generate_assessment(
+        topic="Cloud",
+        instructions="",
+        source_text="IaaS is Infrastructure as a Service.",
+        question_count=1,
+        difficulty="easy"
+    )
+    assert draft.title == "Cloud Fundamentals"
+    assert len(draft.questions) == 1
+    assert draft.questions[0].correct_option_id == "A"
+    get_settings.cache_clear()
+
+
+def test_provider_selection_openai_fallback_missing_key(monkeypatch):
+    from app.config import get_settings
+    from app.question_generator import generate_assessment, GenerationError
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    get_settings.cache_clear()
+
+    with pytest.raises(GenerationError) as exc_info:
+        generate_assessment(
+            topic="Test",
+            instructions="",
+            source_text="Some text",
+            question_count=1,
+            difficulty="easy"
+        )
+    assert "openai api key is not configured" in str(exc_info.value).lower()
+    get_settings.cache_clear()
+
+
+def test_provider_selection_openai_fallback_success(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from app.config import get_settings
+    from app.question_generator import generate_assessment
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-mock-key-for-test")
+    get_settings.cache_clear()
+
+    valid_json = json.dumps({
+        "title": "OpenAI Generated Draft",
+        "topic": "Python",
+        "questions": [
+            {
+                "id": "q1",
+                "question": "What is Python?",
+                "options": [
+                    {"id": "A", "text": "Language"},
+                    {"id": "B", "text": "Snake only"},
+                    {"id": "C", "text": "Vehicle"},
+                    {"id": "D", "text": "Food"}
+                ],
+                "correct_option_id": "A",
+                "explanation": "Python is a language.",
+                "difficulty": "medium",
+                "source_reference": "Doc"
+            }
+        ]
+    })
+
+    class MockResponses:
+        def create(self, **kwargs):
+            return SimpleNamespace(output_text=valid_json)
+
+    class MockOpenAIClient:
+        def __init__(self, **kwargs):
+            self.responses = MockResponses()
+
+    import openai
+    monkeypatch.setattr(openai, "OpenAI", MockOpenAIClient)
+
+    draft = generate_assessment(
+        topic="Python",
+        instructions="",
+        source_text="Python is a language.",
+        question_count=1,
+        difficulty="medium"
+    )
+    assert draft.title == "OpenAI Generated Draft"
+    assert len(draft.questions) == 1
+    assert draft.questions[0].correct_option_id == "A"
+    get_settings.cache_clear()
 
