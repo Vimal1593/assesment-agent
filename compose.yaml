@@ -12,7 +12,7 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
     ports:
       # Isolated test app on host port 8001 (keeping production app running on port 8000)
-      - "127.0.0.1:8001:8000"
+      - "0.0.0.0:8001:8000"
     volumes:
       # Isolated persistent volume for test app (does not overwrite production assessment_data)
       - assessment_test_data:/app/data

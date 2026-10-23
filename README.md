@@ -55,7 +55,7 @@ Open `http://127.0.0.1:8000`. Trainer routes redirect to `/login`; use `APP_ADMI
 This configuration runs the Ollama assessment app as an **isolated test deployment** alongside the existing production application.
 
 ### Key Isolation Guarantees:
-- **Port Isolation:** The test container binds to host port `8001` (`127.0.0.1:8001:8000`), keeping the existing production application running undisturbed on port `8000`.
+- **Port Isolation:** The test container binds to host port `8001` (`0.0.0.0:8001:8000`), allowing direct browser access while keeping the existing production application running undisturbed on port `8000`.
 - **Container Isolation:** The test container is named `assessment-ollama-test` (separate from `training-assessment-ai`).
 - **Data Isolation:** Persists data to a dedicated named volume `assessment_test_data` (does not touch or overwrite `assessment_data`).
 - **Network & Ollama Reuse:** Connects to the existing EC2 `ollama` container over a private Docker bridge network (`ollama_private_network`). Ollama port `11434` is **never** exposed publicly or on the host. No duplicate Ollama container is created on EC2.
@@ -133,15 +133,24 @@ This verifies private reachability of the `ollama` container, checks that `qwen2
 
 ---
 
-### 5. Access the test web interface safely via SSH tunnel
+### 5. Access the test web interface directly in your browser
 
-To open the test app in your browser while keeping port 8001 private to localhost:
+You can open the test application directly in your web browser at:
 
-```bash
-ssh -i /path/to/key.pem -L 8001:127.0.0.1:8001 ubuntu@EC2_PUBLIC_IP
+```
+http://<EC2_PUBLIC_IP>:8001
 ```
 
-Open `http://127.0.0.1:8001` in your browser. (The production app remains available concurrently at `http://127.0.0.1:8000`).
+(The production application remains available concurrently on port 8000).
+
+> [!IMPORTANT]
+> **EC2 Security Group Inbound Rule (Restrict to Trusted IP):**
+> In your AWS EC2 Management Console, add an inbound rule to the instance's Security Group:
+> - **Type:** Custom TCP
+> - **Port Range:** `8001`
+> - **Source:** Your own public IP address / trusted CIDR (e.g. `203.0.113.25/32`, or select **My IP** in the AWS console dropdown).
+>
+> **Do not open port 8001 to `0.0.0.0/0` (Anywhere).** Restricting access to your trusted IP prevents unauthorized internet users from reaching trainer endpoints or submitting assessments while allowing you to test directly from your browser without an SSH tunnel.
 
 ---
 
@@ -237,9 +246,9 @@ The volume name may be prefixed by your Compose project name; confirm it with `d
 ```mermaid
 flowchart TD
     subgraph Host["Ubuntu EC2 Host"]
-        subgraph Ports["Exposed Loopback Ports"]
+        subgraph Ports["Host Port Bindings"]
             P8000["127.0.0.1:8000 (Production App: training-assessment-ai)"]
-            P8001["127.0.0.1:8001 (Isolated Test App: assessment-ollama-test)"]
+            P8001["0.0.0.0:8001 (Direct Access: assessment-ollama-test)"]
         end
         subgraph PrivateNet["Private Docker Bridge: ollama_private_network"]
             APP["assessment-ollama-test container"]
