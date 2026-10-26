@@ -49,7 +49,7 @@ services:
 networks:
   ollama_private_network:
     name: ollama_private_network
-    driver: bridge
+    external: true
 
 volumes:
   assessment_test_data:
