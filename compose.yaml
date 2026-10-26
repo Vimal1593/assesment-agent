@@ -10,6 +10,8 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:0.5b-instruct}
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-2500}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-4096}
     ports:
       # Isolated test app on host port 8001 (keeping production app running on port 8000)
       - "0.0.0.0:8001:8000"

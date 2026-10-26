@@ -436,3 +436,361 @@ def test_provider_selection_openai_fallback_success(monkeypatch):
     assert draft.questions[0].correct_option_id == "A"
     get_settings.cache_clear()
 
+
+def make_mock_question(idx: int, topic: str = "Test"):
+    return {
+        "id": f"q{idx}",
+        "question": f"What is concept {idx} in {topic}?",
+        "options": [
+            {"id": "A", "text": f"Correct option for {idx}"},
+            {"id": "B", "text": f"Distractor B for {idx}"},
+            {"id": "C", "text": f"Distractor C for {idx}"},
+            {"id": "D", "text": f"Distractor D for {idx}"},
+        ],
+        "correct_option_id": "A",
+        "explanation": f"Explanation for question {idx}",
+        "difficulty": "medium",
+        "source_reference": f"Section {idx}",
+    }
+
+
+def test_ollama_generation_10_questions_success(monkeypatch):
+    import json
+    import httpx
+    from app.question_generator import generate_assessment
+
+    questions_10 = [make_mock_question(i, "Python") for i in range(1, 11)]
+    response_payload = {
+        "model": "qwen2.5:0.5b-instruct",
+        "done": True,
+        "done_reason": "stop",
+        "eval_count": 1800,
+        "prompt_eval_count": 250,
+        "message": {
+            "role": "assistant",
+            "content": json.dumps({
+                "title": "Python 10 Questions",
+                "topic": "Python",
+                "questions": questions_10,
+            }),
+        },
+    }
+
+    class MockResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return response_payload
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(httpx.Client, "post", lambda self, url, json=None, **kwargs: MockResponse())
+
+    draft = generate_assessment(
+        topic="Python",
+        instructions="",
+        source_text="Python guide with 10 concepts.",
+        question_count=10,
+        difficulty="medium",
+    )
+    assert len(draft.questions) == 10
+    assert draft.questions[0].id == "q1"
+    assert draft.questions[9].id == "q10"
+
+
+def test_ollama_generation_counts_1_5_10(monkeypatch):
+    import json
+    import httpx
+    from app.question_generator import generate_assessment
+
+    for count in (1, 5, 10):
+        questions = [make_mock_question(i, "Cloud") for i in range(1, count + 1)]
+        resp_data = {
+            "model": "qwen2.5:0.5b-instruct",
+            "done": True,
+            "done_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": json.dumps({"title": "Cloud", "topic": "Cloud", "questions": questions}),
+            },
+        }
+
+        class MockResp:
+            status_code = 200
+            headers = {"content-type": "application/json"}
+            def json(self):
+                return resp_data
+            def raise_for_status(self):
+                pass
+
+        monkeypatch.setattr(httpx.Client, "post", lambda self, url, json=None, **kwargs: MockResp())
+
+        draft = generate_assessment(
+            topic="Cloud",
+            instructions="",
+            source_text="Cloud source material.",
+            question_count=count,
+            difficulty="mixed",
+        )
+        assert len(draft.questions) == count
+
+
+def test_ollama_generation_continuation_when_fewer_questions_returned(monkeypatch):
+    import json
+    import httpx
+    from app.question_generator import generate_assessment
+
+    # First call returns only 1 question when 10 were requested
+    initial_questions = [make_mock_question(1, "DevOps")]
+    # Continuation call returns remaining 9 questions
+    continuation_questions = [make_mock_question(i, "DevOps") for i in range(2, 11)]
+
+    call_count = 0
+
+    class MockSequenceResponse:
+        def __init__(self, data):
+            self._data = data
+            self.status_code = 200
+            self.headers = {"content-type": "application/json"}
+        def json(self):
+            return self._data
+        def raise_for_status(self):
+            pass
+
+    def mock_post_sequence(self, url, json=None, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call yields only 1 question
+            return MockSequenceResponse({
+                "model": "qwen2.5:0.5b-instruct",
+                "done": True,
+                "done_reason": "stop",
+                "eval_count": 200,
+                "message": {
+                    "role": "assistant",
+                    "content": json_dumps({"title": "DevOps", "topic": "DevOps", "questions": initial_questions}),
+                },
+            })
+        else:
+            # Continuation call yields remaining 9 questions
+            return MockSequenceResponse({
+                "model": "qwen2.5:0.5b-instruct",
+                "done": True,
+                "done_reason": "stop",
+                "eval_count": 1600,
+                "message": {
+                    "role": "assistant",
+                    "content": json_dumps({"title": "DevOps", "topic": "DevOps", "questions": continuation_questions}),
+                },
+            })
+
+    json_dumps = json.dumps
+    monkeypatch.setattr(httpx.Client, "post", mock_post_sequence)
+
+    draft = generate_assessment(
+        topic="DevOps",
+        instructions="",
+        source_text="Extensive DevOps manual.",
+        question_count=10,
+        difficulty="medium",
+    )
+    assert call_count == 2
+    assert len(draft.questions) == 10
+    assert draft.questions[0].id == "q1"
+    assert draft.questions[9].id == "q10"
+
+
+def test_ollama_generation_continuation_deduplication(monkeypatch):
+    import json
+    import httpx
+    from app.question_generator import generate_assessment
+
+    # Initial call returns 2 questions
+    q1 = make_mock_question(1, "Security")
+    q2 = make_mock_question(2, "Security")
+    initial_questions = [q1, q2]
+
+    # Continuation returns 1 duplicate of q1 and 1 new question q3
+    q1_dup = make_mock_question(1, "Security")
+    q1_dup["question"] = "What is concept 1 in Security?"  # duplicate text
+    q3 = make_mock_question(3, "Security")
+    continuation_questions = [q1_dup, q3]
+
+    call_count = 0
+
+    class MockResp:
+        def __init__(self, data):
+            self._data = data
+            self.status_code = 200
+            self.headers = {"content-type": "application/json"}
+        def json(self):
+            return self._data
+        def raise_for_status(self):
+            pass
+
+    def mock_post(self, url, json_payload=None, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return MockResp({
+                "model": "qwen2.5:0.5b-instruct",
+                "done": True,
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"title": "Sec", "topic": "Sec", "questions": initial_questions}),
+                },
+            })
+        return MockResp({
+            "model": "qwen2.5:0.5b-instruct",
+            "done": True,
+            "message": {
+                "role": "assistant",
+                "content": json.dumps({"title": "Sec", "topic": "Sec", "questions": continuation_questions}),
+            },
+        })
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    draft = generate_assessment(
+        topic="Security",
+        instructions="",
+        source_text="Security basics.",
+        question_count=3,
+        difficulty="medium",
+    )
+    assert len(draft.questions) == 3
+    # Check that q1 was not added twice
+    texts = [q.question for q in draft.questions]
+    assert len(set(texts)) == 3
+
+
+def test_ollama_generation_insufficient_source_material_raises_error(monkeypatch):
+    import json
+    import httpx
+    from app.question_generator import generate_assessment, GenerationError
+
+    # Both initial and continuation return only 1 question each (total 2 < 10)
+    q1 = make_mock_question(1, "Brief")
+    q2 = make_mock_question(2, "Brief")
+    call_count = 0
+
+    class MockResp:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def __init__(self, q):
+            self.q = q
+        def json(self):
+            return {
+                "model": "qwen2.5:0.5b-instruct",
+                "done": True,
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"title": "Brief", "topic": "Brief", "questions": [self.q]}),
+                },
+            }
+        def raise_for_status(self):
+            pass
+
+    def mock_post(self, url, json=None, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return MockResp(q1 if call_count == 1 else q2)
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    with pytest.raises(GenerationError) as exc_info:
+        generate_assessment(
+            topic="Brief",
+            instructions="",
+            source_text="Only one brief sentence.",
+            question_count=10,
+            difficulty="easy",
+        )
+
+    err = str(exc_info.value).lower()
+    assert "generated only 2 of the 10 requested questions" in err
+    assert "too brief" in err
+
+
+def test_ollama_generation_token_truncation_done_reason_length(monkeypatch):
+    import httpx
+    from app.question_generator import generate_assessment, GenerationError
+
+    # Model was truncated mid-JSON due to output length limit
+    class MockTruncatedResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return {
+                "model": "qwen2.5:0.5b-instruct",
+                "done": True,
+                "done_reason": "length",
+                "eval_count": 2500,
+                "message": {
+                    "role": "assistant",
+                    "content": '{"title": "Truncated", "topic": "T", "questions": [{"id": "q1", "question": "Incomplete',
+                },
+            }
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(httpx.Client, "post", lambda self, url, json=None, **kwargs: MockTruncatedResponse())
+
+    with pytest.raises(GenerationError) as exc_info:
+        generate_assessment(
+            topic="Test",
+            instructions="",
+            source_text="Some source text",
+            question_count=10,
+            difficulty="medium",
+        )
+    assert "validation" in str(exc_info.value).lower() or "json" in str(exc_info.value).lower()
+
+
+def test_ollama_generation_applies_num_predict_and_num_ctx(monkeypatch):
+    import json
+    import httpx
+    from app.config import get_settings
+    from app.question_generator import generate_assessment
+
+    monkeypatch.setenv("OLLAMA_NUM_PREDICT", "3200")
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "8192")
+    get_settings.cache_clear()
+
+    captured_payload = {}
+
+    class MockResp:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return {
+                "model": "qwen2.5:0.5b-instruct",
+                "done": True,
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"title": "T", "topic": "T", "questions": [make_mock_question(1)]}),
+                },
+            }
+        def raise_for_status(self):
+            pass
+
+    def mock_post(self, url, json=None, **kwargs):
+        nonlocal captured_payload
+        captured_payload = json
+        return MockResp()
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    draft = generate_assessment(
+        topic="T",
+        instructions="",
+        source_text="Test source.",
+        question_count=1,
+        difficulty="easy",
+    )
+    assert len(draft.questions) == 1
+    assert captured_payload["options"]["num_predict"] == 3200
+    assert captured_payload["options"]["num_ctx"] == 8192
+    get_settings.cache_clear()
+

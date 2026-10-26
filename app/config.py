@@ -14,6 +14,8 @@ class Settings:
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
         self.ollama_model = os.getenv("OLLAMA_MODEL", "qwen2.5:0.5b-instruct")
         self.ollama_timeout_seconds = max(10.0, float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120.0")))
+        self.ollama_num_predict = max(500, int(os.getenv("OLLAMA_NUM_PREDICT", "2500")))
+        self.ollama_num_ctx = max(2048, int(os.getenv("OLLAMA_NUM_CTX", "4096")))
         self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
         self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.data_dir = Path(os.getenv("DATA_DIR", "./data")).expanduser()
